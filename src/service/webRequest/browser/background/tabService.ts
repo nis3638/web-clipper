@@ -23,6 +23,7 @@ export class BackgroundWebRequestService implements IWebRequestService {
 
   async startChangeHeader(option: WebRequestBlockOption): Promise<WebBlockHeader> {
     const uuid = short.generate();
+    const requestDomains = option.urls.map((url) => new URL(url).hostname);
     const modifyHeadersAction: chrome.declarativeNetRequest.RuleAction = {
       type: 'modifyHeaders' as chrome.declarativeNetRequest.RuleActionType,
       requestHeaders: option.requestHeaders.map((header) => ({
@@ -38,6 +39,8 @@ export class BackgroundWebRequestService implements IWebRequestService {
       action: modifyHeadersAction,
       condition: {
         urlFilter: uuid,
+        requestDomains,
+        resourceTypes: ['xmlhttprequest' as chrome.declarativeNetRequest.ResourceType],
       },
     };
     await chrome.declarativeNetRequest.updateDynamicRules({
@@ -66,9 +69,10 @@ export class BackgroundWebRequestService implements IWebRequestService {
     if (!handler) {
       return;
     }
-    chrome.declarativeNetRequest.updateDynamicRules({
+    await chrome.declarativeNetRequest.updateDynamicRules({
       addRules: [],
       removeRuleIds: handler.ruleId,
     });
+    this.handlerMap.delete(webBlockHeader.value);
   }
 }
