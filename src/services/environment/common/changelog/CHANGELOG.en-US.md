@@ -1,3 +1,13 @@
+## 1.42.1
+
+`2026-08-23`
+
+- Fix false unauthorized errors for active Notion sessions
+- Support both `app.notion.com` and legacy `notion.so` sessions
+- Fix HTTP 400 errors caused by Notion private API changes
+- Restore workspace, page, and database discovery in Default Repository
+- Fix stale and conflicting temporary Cookie header rules
+
 ## 1.42.0
 
 `2025-10-21`
