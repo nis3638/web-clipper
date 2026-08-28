@@ -17,6 +17,44 @@ describe('NotionDocumentService authentication', () => {
     Container.reset();
   });
 
+  it('identifies the service and requests a Markdown upload URL', async () => {
+    const upload = {
+      url: 'https://files.example/article.md',
+      signedPutUrl: 'https://uploads.example/article.md',
+      signedToken: 'signed-token',
+    };
+    const post = vi.fn().mockResolvedValue({ data: upload });
+    vi.spyOn(axios, 'create').mockReturnValue({
+      post,
+      interceptors: { response: { use: vi.fn() } },
+    } as unknown as AxiosInstance);
+    Container.set(ICookieService, {
+      get: vi.fn(),
+      getAll: vi.fn().mockResolvedValue([]),
+      getAllCookieStores: vi.fn(),
+    });
+    Container.set(IWebRequestService, {
+      startChangeHeader: vi.fn().mockResolvedValue({ name: 'probe', value: 'probe' }),
+      end: vi.fn().mockResolvedValue(undefined),
+      changeUrl: vi.fn((url: string) => Promise.resolve(url)),
+      requestInBackground: vi.fn(),
+    });
+
+    const service = new NotionDocumentService();
+
+    expect(service.getId()).toBe('notion');
+    await expect(service.getFileUrl('Article.md')).resolves.toEqual(upload);
+    expect(post).toHaveBeenCalledWith(
+      'https://app.notion.com/api/v3/getUploadFileUrl',
+      {
+        bucket: 'temporary',
+        name: 'Article.md',
+        contentType: 'text/markdown',
+      },
+      {}
+    );
+  });
+
   it('keeps each Notion origin paired with its own cookies while probing login', async () => {
     const userContent = {
       recordMap: {
@@ -704,15 +742,228 @@ describe('NotionDocumentService authentication', () => {
             spaceId: 'space-1',
             operations: expect.arrayContaining([
               expect.objectContaining({
-                id: documentId,
+                pointer: { id: documentId, table: 'block', spaceId: 'space-1' },
                 command: 'set',
-                args: expect.objectContaining({ type: 'page', space_id: 'space-1' }),
+                args: expect.objectContaining({
+                  type: 'page',
+                  space_id: 'space-1',
+                  parent_id: 'page-1',
+                  parent_table: 'block',
+                  alive: true,
+                }),
               }),
               expect.objectContaining({
-                id: documentId,
+                pointer: { id: documentId, table: 'block', spaceId: 'space-1' },
                 path: ['properties', 'title'],
                 command: 'set',
                 args: [['Article']],
+              }),
+            ]),
+          }),
+        ],
+      }),
+      {}
+    );
+    const savePayload = post.mock.calls.find(([url]) => url.includes('saveTransactionsFanout'))![1];
+    for (const operation of savePayload.transactions[0].operations) {
+      expect(operation.pointer).toEqual({
+        id: expect.any(String),
+        table: 'block',
+        spaceId: 'space-1',
+      });
+      expect(operation).not.toHaveProperty('id');
+      expect(operation).not.toHaveProperty('table');
+    }
+  });
+
+  it('creates a database row with its collection ancestor in the initial operation', async () => {
+    const post = vi.fn((url: string) => {
+      if (url.includes('saveTransactionsFanout')) return Promise.resolve({ data: {} });
+      return Promise.reject(new Error(`Unexpected Notion request: ${url}`));
+    });
+    vi.spyOn(axios, 'create').mockReturnValue({
+      post,
+      interceptors: { response: { use: vi.fn() } },
+    } as unknown as AxiosInstance);
+    Container.set(ICookieService, {
+      get: vi.fn(),
+      getAll: vi.fn().mockResolvedValue([]),
+      getAllCookieStores: vi.fn(),
+    });
+    Container.set(IWebRequestService, {
+      startChangeHeader: vi.fn().mockResolvedValue({ name: 'probe', value: 'probe' }),
+      end: vi.fn().mockResolvedValue(undefined),
+      changeUrl: vi.fn((url: string) => Promise.resolve(url)),
+      requestInBackground: vi.fn(),
+    });
+
+    const service = new NotionDocumentService();
+    (service as any).userContent = {
+      recordMap: {
+        notion_user: { user: { value: { id: 'user' } } },
+        space: { 'space-1': { value: { name: 'Workspace' } } },
+      },
+    };
+
+    const documentId = await service.createEmptyFile(
+      {
+        id: 'collection-1',
+        name: 'Tasks',
+        groupId: 'space-1',
+        groupName: 'Workspace',
+        pageType: 'collection_view_page',
+      },
+      'Article'
+    );
+
+    expect(post).toHaveBeenCalledWith(
+      'https://app.notion.com/api/v3/saveTransactionsFanout',
+      expect.objectContaining({
+        transactions: [
+          expect.objectContaining({
+            spaceId: 'space-1',
+            operations: [
+              expect.objectContaining({
+                pointer: { id: documentId, table: 'block', spaceId: 'space-1' },
+                command: 'set',
+                args: expect.objectContaining({
+                  space_id: 'space-1',
+                  parent_id: 'collection-1',
+                  parent_table: 'collection',
+                  alive: true,
+                }),
+              }),
+            ],
+          }),
+        ],
+      }),
+      {}
+    );
+  });
+
+  it('imports content into the workspace selected by the repository', async () => {
+    const post = vi.fn((url: string) => {
+      if (url.includes('enqueueTask')) return Promise.resolve({ data: {} });
+      return Promise.reject(new Error(`Unexpected Notion request: ${url}`));
+    });
+    vi.spyOn(axios, 'create').mockReturnValue({
+      post,
+      interceptors: { response: { use: vi.fn() } },
+    } as unknown as AxiosInstance);
+    vi.spyOn(axios, 'put').mockResolvedValue({ data: {} });
+    Container.set(ICookieService, {
+      get: vi.fn(),
+      getAll: vi.fn().mockResolvedValue([]),
+      getAllCookieStores: vi.fn(),
+    });
+    Container.set(IWebRequestService, {
+      startChangeHeader: vi.fn().mockResolvedValue({ name: 'probe', value: 'probe' }),
+      end: vi.fn().mockResolvedValue(undefined),
+      changeUrl: vi.fn((url: string) => Promise.resolve(url)),
+      requestInBackground: vi.fn(),
+    });
+
+    const repository = {
+      id: 'page-in-space-2',
+      name: 'Home',
+      groupId: 'space-2',
+      groupName: 'Selected workspace',
+      pageType: 'page',
+    };
+    const service = new NotionDocumentService();
+    (service as any).repositories = [repository];
+    (service as any).userContent = {
+      recordMap: {
+        notion_user: { user: { value: { id: 'user' } } },
+        space: {
+          'space-1': { value: { name: 'First workspace' } },
+          'space-2': { value: { name: 'Selected workspace' } },
+        },
+      },
+    };
+    vi.spyOn(service, 'createEmptyFile').mockResolvedValue('document-1');
+    vi.spyOn(service, 'getFileUrl').mockResolvedValue({
+      url: 'https://files.example/article.md',
+      signedPutUrl: 'https://uploads.example/article.md',
+      signedToken: 'signed-token',
+    });
+
+    await service.createDocument({
+      repositoryId: repository.id,
+      title: 'Article',
+      content: '# Article',
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      'https://app.notion.com/api/v3/enqueueTask',
+      expect.objectContaining({
+        task: expect.objectContaining({
+          request: expect.objectContaining({
+            block: { id: 'document-1', spaceId: 'space-2' },
+            spaceId: 'space-2',
+          }),
+        }),
+      }),
+      {}
+    );
+  });
+
+  it('creates a child page in the workspace selected by the repository', async () => {
+    const post = vi.fn((url: string) => {
+      if (url.includes('saveTransactionsFanout')) return Promise.resolve({ data: {} });
+      return Promise.reject(new Error(`Unexpected Notion request: ${url}`));
+    });
+    vi.spyOn(axios, 'create').mockReturnValue({
+      post,
+      interceptors: { response: { use: vi.fn() } },
+    } as unknown as AxiosInstance);
+    Container.set(ICookieService, {
+      get: vi.fn(),
+      getAll: vi.fn().mockResolvedValue([]),
+      getAllCookieStores: vi.fn(),
+    });
+    Container.set(IWebRequestService, {
+      startChangeHeader: vi.fn().mockResolvedValue({ name: 'probe', value: 'probe' }),
+      end: vi.fn().mockResolvedValue(undefined),
+      changeUrl: vi.fn((url: string) => Promise.resolve(url)),
+      requestInBackground: vi.fn(),
+    });
+
+    const service = new NotionDocumentService();
+    (service as any).userContent = {
+      recordMap: {
+        notion_user: { user: { value: { id: 'user' } } },
+        space: {
+          'space-1': { value: { name: 'First workspace' } },
+          'space-2': { value: { name: 'Selected workspace' } },
+        },
+      },
+    };
+
+    const documentId = await service.createEmptyFile(
+      {
+        id: 'page-in-space-2',
+        name: 'Home',
+        groupId: 'space-2',
+        groupName: 'Selected workspace',
+        pageType: 'page',
+      },
+      'Article'
+    );
+
+    expect(post).toHaveBeenCalledWith(
+      'https://app.notion.com/api/v3/saveTransactionsFanout',
+      expect.objectContaining({
+        transactions: [
+          expect.objectContaining({
+            spaceId: 'space-2',
+            operations: expect.arrayContaining([
+              expect.objectContaining({
+                pointer: { id: documentId, table: 'block', spaceId: 'space-2' },
+                args: expect.objectContaining({
+                  space_id: 'space-2',
+                  parent_id: 'page-in-space-2',
+                }),
               }),
             ]),
           }),

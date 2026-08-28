@@ -51,6 +51,21 @@ function getRecordRequests(table: string, ids: string[]) {
   return ids.map((id) => ({ pointer: { table, id }, version: -1 }));
 }
 
+interface NotionOperation {
+  id: string;
+  table: string;
+  path: string[];
+  command: string;
+  args: unknown;
+}
+
+function addOperationPointers(operations: NotionOperation[], spaceId: string) {
+  return operations.map(({ id, table, ...operation }) => ({
+    pointer: { id, table, spaceId },
+    ...operation,
+  }));
+}
+
 function getSpaceViewIds(userContent: NotionUserContent, spaceId: string): string[] {
   const ids = Object.values(userContent.recordMap.user_root || {}).flatMap(({ value }) =>
     (value.space_view_pointers || [])
@@ -275,10 +290,7 @@ export default class NotionDocumentService implements DocumentService {
         'Content-Type': 'text/markdown',
       },
     });
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
-    }
-    const spaceId = await this.getSpaceId();
+    const spaceId = repository.groupId;
     await this.requestWithCookie.post('api/v3/enqueueTask', {
       task: {
         eventName: 'importFile',
@@ -301,6 +313,7 @@ export default class NotionDocumentService implements DocumentService {
     };
   };
 
+  /** @deprecated A save operation must use its repository's groupId instead. */
   getSpaceId = async () => {
     if (!this.userContent) {
       this.userContent = await this.getUserContent();
@@ -317,14 +330,14 @@ export default class NotionDocumentService implements DocumentService {
     if (!this.userContent) {
       this.userContent = await this.getUserContent();
     }
-    const spaceId = await this.getSpaceId();
+    const spaceId = repository.groupId;
     const documentId = generateUuid();
     const requestId = generateUuid();
     const inner_requestId = generateUuid();
     const parentId = repository.id;
     const userId = Object.values(this.userContent.recordMap.notion_user)[0].value.id;
     const time = new Date().getDate();
-    let operations;
+    let operations: NotionOperation[] = [];
     if (repository.pageType === PAGE) {
       operations = [
         {
@@ -337,18 +350,9 @@ export default class NotionDocumentService implements DocumentService {
             id: documentId,
             space_id: spaceId,
             version: 1,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
             parent_id: parentId,
             parent_table: 'block',
             alive: true,
-            space_id: spaceId,
           },
         },
         {
@@ -414,17 +418,8 @@ export default class NotionDocumentService implements DocumentService {
             id: documentId,
             space_id: spaceId,
             version: 1,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
             parent_id: parentId,
             parent_table: 'collection',
-            space_id: spaceId,
             alive: true,
           },
         },
@@ -436,7 +431,7 @@ export default class NotionDocumentService implements DocumentService {
       transactions: [
         {
           id: inner_requestId,
-          operations: operations,
+          operations: addOperationPointers(operations, spaceId),
           spaceId: spaceId,
         },
       ],
