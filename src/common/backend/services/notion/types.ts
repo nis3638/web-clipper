@@ -106,3 +106,11 @@ export interface RecentPages {
 export interface NotionRepository extends Repository {
   pageType: string;
 }
+
+export interface NotionOperation {
+  id: string;
+  table: string;
+  path: string[];
+  command: string;
+  args: unknown;
+}

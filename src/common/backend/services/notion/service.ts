@@ -13,7 +13,12 @@ import {
   getSpacesFromUserContent,
   NotionSpace,
 } from './repository';
-import { NotionRepository, NotionUserContent } from './types';
+import { NotionRepository, NotionUserContent, NotionOperation } from './types';
+import {
+  blocksToOperations,
+  markdownToNotionBlocks,
+  stripLeadingTitleHeading,
+} from './markdown';
 
 const PAGE = 'page';
 const COLLECTION_VIEW_PAGE = 'collection_view_page';
@@ -21,9 +26,14 @@ const COLLECTION_VIEW_PAGE = 'collection_view_page';
 class NotionRequestError extends Error {
   constructor(
     public status: number,
-    public path: string
+    public path: string,
+    public responseBody?: string
   ) {
-    super(`Notion request failed with status code ${status} at ${path}`);
+    super(
+      `Notion request failed with status code ${status} at ${path}${
+        responseBody ? `: ${responseBody}` : ''
+      }`
+    );
     this.name = 'NotionRequestError';
   }
 }
@@ -49,14 +59,6 @@ interface NotionSearchResponse {
 
 function getRecordRequests(table: string, ids: string[]) {
   return ids.map((id) => ({ pointer: { table, id }, version: -1 }));
-}
-
-interface NotionOperation {
-  id: string;
-  table: string;
-  path: string[];
-  command: string;
-  args: unknown;
 }
 
 function addOperationPointers(operations: NotionOperation[], spaceId: string) {
@@ -113,7 +115,12 @@ export default class NotionDocumentService implements DocumentService {
       timeout: 10000,
       transformResponse: [
         (data): any => {
-          return JSON.parse(data);
+          if (typeof data !== 'string') return data;
+          try {
+            return JSON.parse(data);
+          } catch {
+            return data;
+          }
         },
       ],
       withCredentials: true,
@@ -276,37 +283,33 @@ export default class NotionDocumentService implements DocumentService {
     title,
     content,
   }: CreateDocumentRequest): Promise<CompleteStatus> => {
-    let fileName = `${title}.md`;
-
     const repository = this.repositories.find((o) => o.id === repositoryId);
     if (!repository) {
       throw new Error('Illegal repository');
     }
 
-    const documentId = await this.createEmptyFile(repository, content);
-    const fileUrl = await this.getFileUrl(encodeURI(fileName));
-    await axios.put(fileUrl.signedPutUrl, `${content}`, {
-      headers: {
-        'Content-Type': 'text/markdown',
-      },
-    });
+    const documentId = await this.createEmptyFile(repository, title);
     const spaceId = repository.groupId;
-    await this.requestWithCookie.post('api/v3/enqueueTask', {
-      task: {
-        eventName: 'importFile',
-        request: {
-          fileURL: fileUrl.url,
-          fileName,
-          importType: 'ReplaceBlock',
-          block: {
-            id: documentId,
-            spaceId: spaceId,
+    const contentBlocks = stripLeadingTitleHeading(
+      markdownToNotionBlocks(content),
+      title
+    );
+    const operations = addOperationPointers(
+      blocksToOperations(contentBlocks, documentId, spaceId),
+      spaceId
+    );
+    if (operations.length > 0) {
+      await this.requestWithCookie.post('api/v3/saveTransactionsFanout', {
+        requestId: generateUuid(),
+        transactions: [
+          {
+            id: generateUuid(),
+            operations,
+            spaceId,
           },
-          spaceId: spaceId,
-          signedToken: fileUrl.signedToken,
-        },
-      },
-    });
+        ],
+      });
+    }
 
     return {
       href: `${NOTION_APP_ORIGIN}${repository.groupId}/${documentId.replace(/-/g, '')}`,
@@ -336,7 +339,7 @@ export default class NotionDocumentService implements DocumentService {
     const inner_requestId = generateUuid();
     const parentId = repository.id;
     const userId = Object.values(this.userContent.recordMap.notion_user)[0].value.id;
-    const time = new Date().getDate();
+    const time = Date.now();
     let operations: NotionOperation[] = [];
     if (repository.pageType === PAGE) {
       operations = [
@@ -439,19 +442,6 @@ export default class NotionDocumentService implements DocumentService {
     return documentId;
   };
 
-  getFileUrl = async (fileName: string) => {
-    const result = await this.requestWithCookie.post<{
-      url: string;
-      signedPutUrl: string;
-      signedToken: string;
-    }>('api/v3/getUploadFileUrl', {
-      bucket: 'temporary',
-      name: fileName,
-      contentType: 'text/markdown',
-    });
-    return result.data;
-  };
-
   private getUserContent = async () => {
     const result = await requestFromAuthenticatedNotionOrigin(async (origin) => {
       const response = await this.requestWithCookie.post<NotionUserContent>(
@@ -507,7 +497,10 @@ export default class NotionDocumentService implements DocumentService {
       } catch (error) {
         await this.webRequestService.end(header);
         if (axios.isAxiosError(error) && error.response) {
-          throw new NotionRequestError(error.response.status, new URL(requestUrl).pathname);
+          const { data } = error.response;
+          const responseBody =
+            typeof data === 'string' ? data : data === undefined ? undefined : JSON.stringify(data);
+          throw new NotionRequestError(error.response.status, new URL(requestUrl).pathname, responseBody);
         }
         throw error;
       }

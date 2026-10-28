@@ -17,15 +17,9 @@ describe('NotionDocumentService authentication', () => {
     Container.reset();
   });
 
-  it('identifies the service and requests a Markdown upload URL', async () => {
-    const upload = {
-      url: 'https://files.example/article.md',
-      signedPutUrl: 'https://uploads.example/article.md',
-      signedToken: 'signed-token',
-    };
-    const post = vi.fn().mockResolvedValue({ data: upload });
+  it('identifies the Notion service', () => {
     vi.spyOn(axios, 'create').mockReturnValue({
-      post,
+      post: vi.fn(),
       interceptors: { response: { use: vi.fn() } },
     } as unknown as AxiosInstance);
     Container.set(ICookieService, {
@@ -43,16 +37,6 @@ describe('NotionDocumentService authentication', () => {
     const service = new NotionDocumentService();
 
     expect(service.getId()).toBe('notion');
-    await expect(service.getFileUrl('Article.md')).resolves.toEqual(upload);
-    expect(post).toHaveBeenCalledWith(
-      'https://app.notion.com/api/v3/getUploadFileUrl',
-      {
-        bucket: 'temporary',
-        name: 'Article.md',
-        contentType: 'text/markdown',
-      },
-      {}
-    );
   });
 
   it('keeps each Notion origin paired with its own cookies while probing login', async () => {
@@ -843,14 +827,13 @@ describe('NotionDocumentService authentication', () => {
 
   it('imports content into the workspace selected by the repository', async () => {
     const post = vi.fn((url: string) => {
-      if (url.includes('enqueueTask')) return Promise.resolve({ data: {} });
+      if (url.includes('saveTransactionsFanout')) return Promise.resolve({ data: {} });
       return Promise.reject(new Error(`Unexpected Notion request: ${url}`));
     });
     vi.spyOn(axios, 'create').mockReturnValue({
       post,
       interceptors: { response: { use: vi.fn() } },
     } as unknown as AxiosInstance);
-    vi.spyOn(axios, 'put').mockResolvedValue({ data: {} });
     Container.set(ICookieService, {
       get: vi.fn(),
       getAll: vi.fn().mockResolvedValue([]),
@@ -882,30 +865,43 @@ describe('NotionDocumentService authentication', () => {
       },
     };
     vi.spyOn(service, 'createEmptyFile').mockResolvedValue('document-1');
-    vi.spyOn(service, 'getFileUrl').mockResolvedValue({
-      url: 'https://files.example/article.md',
-      signedPutUrl: 'https://uploads.example/article.md',
-      signedToken: 'signed-token',
-    });
 
     await service.createDocument({
       repositoryId: repository.id,
       title: 'Article',
-      content: '# Article',
+      content: '# Article\n\nHello **world**',
     });
 
-    expect(post).toHaveBeenCalledWith(
-      'https://app.notion.com/api/v3/enqueueTask',
-      expect.objectContaining({
-        task: expect.objectContaining({
-          request: expect.objectContaining({
-            block: { id: 'document-1', spaceId: 'space-2' },
-            spaceId: 'space-2',
+    expect(post).toHaveBeenCalledTimes(1);
+    const [, payload] = post.mock.calls[0];
+    const operations = payload.transactions[0].operations;
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pointer: { id: expect.any(String), table: 'block', spaceId: 'space-2' },
+          command: 'set',
+          args: expect.objectContaining({
+            type: 'text',
+            parent_id: 'document-1',
+            parent_table: 'block',
+            space_id: 'space-2',
           }),
         }),
-      }),
-      {}
+        expect.objectContaining({
+          pointer: { id: 'document-1', table: 'block', spaceId: 'space-2' },
+          command: 'listAfter',
+          path: ['content'],
+        }),
+      ])
     );
+    // the leading heading duplicates the clip title, so content starts with the paragraph
+    const textBlock = operations.find(
+      (op) => op.command === 'set' && (op.args as any).type === 'text'
+    );
+    expect((textBlock!.args as any).properties.title).toEqual([
+      ['Hello '],
+      ['world', [['b']]],
+    ]);
   });
 
   it('creates a child page in the workspace selected by the repository', async () => {
