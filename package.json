@@ -6,8 +6,8 @@
     "web-clipper": "bin/index.js"
   },
   "scripts": {
-    "test": "vitest",
-    "cov": "vitest --coverage",
+    "test": "vitest run",
+    "cov": "vitest run --coverage",
     "dev": "webpack --config webpack/webpack.dev.js --watch",
     "release": "ts-node script/release.ts",
     "format": "web-clipper format"
